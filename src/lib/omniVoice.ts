@@ -7,8 +7,10 @@ type VoiceCallback = (state: VoiceState, text?: string) => void;
 
 class OmniVoiceEngine {
   private isEnabled: boolean = true;
+  private selectedVoiceURI: string | null = null;
   private currentUtterance: SpeechSynthesisUtterance | null = null;
   private listeners: Set<VoiceCallback> = new Set();
+  private voiceChangeListeners: Set<(voices: SpeechSynthesisVoice[]) => void> = new Set();
   private recognition: any = null;
   private isListening: boolean = false;
   private activeState: VoiceState = 'idle';
@@ -20,10 +22,16 @@ class OmniVoiceEngine {
         this.isEnabled = saved === 'true';
       }
 
-      // Pre-warm SpeechSynthesis voices
+      const savedVoice = localStorage.getItem('omni_selected_voice_uri');
+      if (savedVoice) {
+        this.selectedVoiceURI = savedVoice;
+      }
+
+      // Pre-warm SpeechSynthesis voices and listen for changes
       if ('speechSynthesis' in window) {
         window.speechSynthesis.onvoiceschanged = () => {
-          this.getPreferredVoice();
+          const voices = this.getAvailableVoices();
+          this.voiceChangeListeners.forEach((cb) => cb(voices));
         };
       }
     }
@@ -35,9 +43,49 @@ class OmniVoiceEngine {
     return () => this.listeners.delete(cb);
   }
 
+  public onVoicesChanged(cb: (voices: SpeechSynthesisVoice[]) => void): () => void {
+    this.voiceChangeListeners.add(cb);
+    if (this.isSpeechSynthesisSupported()) {
+      cb(this.getAvailableVoices());
+    }
+    return () => this.voiceChangeListeners.delete(cb);
+  }
+
   private notify(state: VoiceState, text?: string) {
     this.activeState = state;
     this.listeners.forEach((cb) => cb(state, text));
+  }
+
+  public isSpeechSynthesisSupported(): boolean {
+    return typeof window !== 'undefined' && 'speechSynthesis' in window;
+  }
+
+  public getAvailableVoices(): SpeechSynthesisVoice[] {
+    if (!this.isSpeechSynthesisSupported()) return [];
+    return window.speechSynthesis.getVoices() || [];
+  }
+
+  public getSelectedVoiceURI(): string | null {
+    return this.selectedVoiceURI;
+  }
+
+  public setSelectedVoiceURI(uri: string | null): void {
+    this.selectedVoiceURI = uri && uri.trim() ? uri.trim() : null;
+    if (typeof window !== 'undefined') {
+      if (this.selectedVoiceURI) {
+        localStorage.setItem('omni_selected_voice_uri', this.selectedVoiceURI);
+      } else {
+        localStorage.removeItem('omni_selected_voice_uri');
+      }
+    }
+    this.notify(this.activeState);
+  }
+
+  public isSelectedVoiceAvailable(): boolean {
+    if (!this.selectedVoiceURI) return true;
+    const voices = this.getAvailableVoices();
+    if (voices.length === 0) return true; // not loaded yet
+    return voices.some((v) => v.voiceURI === this.selectedVoiceURI || v.name === this.selectedVoiceURI);
   }
 
   public getVoiceEnabled(): boolean {
@@ -59,12 +107,20 @@ class OmniVoiceEngine {
     return this.setVoiceEnabled(!this.isEnabled);
   }
 
-  private getPreferredVoice(): SpeechSynthesisVoice | null {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return null;
+  public getPreferredVoice(): SpeechSynthesisVoice | null {
+    if (!this.isSpeechSynthesisSupported()) return null;
     const voices = window.speechSynthesis.getVoices();
     if (!voices || voices.length === 0) return null;
 
-    // Prefer stoic, deep, clear English voices
+    // 1. If user explicitly selected a voice, use it
+    if (this.selectedVoiceURI) {
+      const match = voices.find(
+        (v) => v.voiceURI === this.selectedVoiceURI || v.name === this.selectedVoiceURI
+      );
+      if (match) return match;
+    }
+
+    // 2. Default fallback: prefer stoic, deep, clear English voices
     const preferredNames = [
       'Daniel',
       'Aaron',
@@ -85,6 +141,40 @@ class OmniVoiceEngine {
     }
 
     return voices.find((v) => v.lang.startsWith('en')) || voices[0];
+  }
+
+  public previewVoice(voiceURI?: string, sampleText = 'Greetings. I am OmniAI, your nocturnal shadow companion.'): void {
+    if (!this.isSpeechSynthesisSupported()) return;
+    this.stop();
+
+    const utterance = new SpeechSynthesisUtterance(sampleText);
+    const voices = this.getAvailableVoices();
+    const targetURI = voiceURI || this.selectedVoiceURI;
+    if (targetURI) {
+      const match = voices.find((v) => v.voiceURI === targetURI || v.name === targetURI);
+      if (match) utterance.voice = match;
+    } else {
+      const preferred = this.getPreferredVoice();
+      if (preferred) utterance.voice = preferred;
+    }
+
+    utterance.pitch = 0.88;
+    utterance.rate = 1.0;
+    utterance.volume = 1.0;
+    this.playSonicPulse(640, 0.05);
+
+    utterance.onstart = () => this.notify('speaking', sampleText);
+    utterance.onend = () => {
+      this.notify('idle');
+      this.currentUtterance = null;
+    };
+    utterance.onerror = () => {
+      this.notify('idle');
+      this.currentUtterance = null;
+    };
+
+    this.currentUtterance = utterance;
+    window.speechSynthesis.speak(utterance);
   }
 
   // Play subtle mechanical / cybernetic tone using Web Audio API as audio cue
