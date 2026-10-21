@@ -1,0 +1,121 @@
+{
+  "entities": {
+    "userProfile": {
+      "title": "User Profile",
+      "description": "User profile with authentication and keyboard settings",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "photoUrl": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "admin", "owner"] },
+        "plan": { "type": "string", "enum": ["free", "creator_pro", "studio_ultra", "enterprise"] },
+        "isBanned": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "email"]
+    },
+    "vaultAsset": {
+      "title": "Vault Asset",
+      "description": "Segregated media items in the Omni Vault (beats, motions, clips, images, songs)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "type": { "type": "string", "enum": ["song", "beat", "motion", "clip", "image"] },
+        "title": { "type": "string" },
+        "url": { "type": "string" },
+        "thumbnail": { "type": "string" },
+        "metadata": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "type", "title"]
+    },
+    "councilSession": {
+      "title": "Council Session",
+      "description": "Recorded query and deciphered quorum consensus from the multi-LLM council",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "question": { "type": "string" },
+        "consensus": { "type": "string" },
+        "consensusScore": { "type": "number" },
+        "perspectives": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "question"]
+    },
+    "savedKeyboardClip": {
+      "title": "Saved Keyboard Clip",
+      "description": "Tactical advice, quick snippets, and custom replies saved by the user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "content": { "type": "string" },
+        "sourceApp": { "type": "string" },
+        "tags": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "content"]
+    },
+    "screenVisionLog": {
+      "title": "Screen Vision Log",
+      "description": "Captured screen perception and tactical AI advice",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "summary": { "type": "string" },
+        "intent": { "type": "string" },
+        "advice": { "type": "array" },
+        "suggestedReplies": { "type": "array" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "summary"]
+    },
+    "workspaceNote": {
+      "title": "Workspace Note & Keep Sync",
+      "description": "Synced Google Keep notes, Gmail snippets, and Drive references",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "source": { "type": "string", "enum": ["keep", "gmail", "drive", "local"] },
+        "externalId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "title"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "userProfile",
+      "description": "User profile data accessible only by owner or admin"
+    },
+    "/users/{userId}/vault/{assetId}": {
+      "schema": "vaultAsset",
+      "description": "User media vault assets"
+    },
+    "/users/{userId}/council/{sessionId}": {
+      "schema": "councilSession",
+      "description": "User saved council sessions and verdicts"
+    },
+    "/users/{userId}/clips/{clipId}": {
+      "schema": "savedKeyboardClip",
+      "description": "User saved keyboard snippets and responses"
+    },
+    "/users/{userId}/visionLogs/{logId}": {
+      "schema": "screenVisionLog",
+      "description": "User screen vision analysis history"
+    },
+    "/users/{userId}/notes/{noteId}": {
+      "schema": "workspaceNote",
+      "description": "User Google Keep and Workspace synchronized notes"
+    }
+  }
+}
