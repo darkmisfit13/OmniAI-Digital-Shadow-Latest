@@ -902,6 +902,8 @@ export const AdminHub: React.FC = () => {
               </button>
             </div>
           </div>
+        )}
+
         {/* Tab 5: Google Workspace Integration */}
         {activeTab === 'workspace' && (
           <div className="h-full">

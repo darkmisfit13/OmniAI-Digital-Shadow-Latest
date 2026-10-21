@@ -24,9 +24,35 @@ import {
   MessageSquare,
   Scale,
   BrainCircuit,
-  Award
+  Award,
+  History,
+  Plus,
+  Trash2,
+  Edit2,
+  LogOut,
+  LogIn,
+  X,
+  Search,
+  Lock,
+  User as UserIcon
 } from 'lucide-react';
 import { HoloOrb, OrbPhase } from './HoloOrb';
+import { 
+  supabase, 
+  getCurrentUser, 
+  onAuthStateChange, 
+  signInWithEmail, 
+  signUpWithEmail, 
+  signOut as supabaseSignOut, 
+  listChatThreads, 
+  createChatThread, 
+  renameChatThread, 
+  deleteChatThread, 
+  loadThreadMessages, 
+  saveChatMessage,
+  ChatThreadItem 
+} from '../lib/supabase';
+import { User as SupabaseUser } from '@supabase/supabase-js';
 
 export interface ChatMessage {
   id: string;
@@ -67,6 +93,24 @@ export const OmniChatAndCouncil: React.FC<OmniChatAndCouncilProps> = ({ onSaveTo
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [expandedCouncilCards, setExpandedCouncilCards] = useState<Record<string, boolean>>({});
 
+  // Supabase Authentication & Threads State
+  const [supabaseUser, setSupabaseUser] = useState<SupabaseUser | null>(null);
+  const [threads, setThreads] = useState<ChatThreadItem[]>([]);
+  const [activeThread, setActiveThread] = useState<ChatThreadItem | null>(null);
+  const [isThreadsDrawerOpen, setIsThreadsDrawerOpen] = useState(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authDisplayName, setAuthDisplayName] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [threadsSearchQuery, setThreadsSearchQuery] = useState('');
+  const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState('');
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioFileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -81,6 +125,154 @@ export const OmniChatAndCouncil: React.FC<OmniChatAndCouncilProps> = ({ onSaveTo
       mode: 'normal',
     },
   ]);
+
+  // Supabase Auth and Threads Lifecycle
+  useEffect(() => {
+    getCurrentUser().then((u) => {
+      setSupabaseUser(u);
+      if (u) {
+        loadUserThreads(u.id);
+      }
+    });
+
+    const { data: { subscription } } = onAuthStateChange((u) => {
+      setSupabaseUser(u);
+      if (u) {
+        loadUserThreads(u.id);
+      } else {
+        setThreads([]);
+        setActiveThread(null);
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  const loadUserThreads = async (userId: string) => {
+    try {
+      const list = await listChatThreads(userId);
+      setThreads(list);
+    } catch (err) {
+      console.warn('Could not load Supabase threads:', err);
+    }
+  };
+
+  const handleSelectThread = async (thread: ChatThreadItem) => {
+    setActiveThread(thread);
+    setIsThreadsDrawerOpen(false);
+    if (!supabaseUser) return;
+
+    setIsLoadingMessages(true);
+    setOrbPhase('processing');
+    try {
+      const records = await loadThreadMessages(thread.id, supabaseUser.id);
+      if (records.length > 0) {
+        const mapped: ChatMessage[] = records.map((r) => {
+          const m = r.message || {};
+          return {
+            id: r.sdk_id || r.id,
+            sender: m.sender || (m.role === 'user' ? 'user' : m.mode === 'council' ? 'council' : 'omni'),
+            text: m.text || m.content || '',
+            timestamp: r.created_at ? new Date(r.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Earlier',
+            mode: m.mode || (m.role === 'user' ? 'normal' : 'normal'),
+            councilData: m.councilData,
+          };
+        });
+        setMessages(mapped);
+      } else {
+        setMessages([
+          {
+            id: `welcome-${thread.id}`,
+            sender: 'omni',
+            text: `Conversation "${thread.title}" opened. Ready for your instructions.`,
+            timestamp: 'Just now',
+            mode: 'normal',
+          },
+        ]);
+      }
+    } catch (err) {
+      console.warn('Failed to load thread messages:', err);
+    } finally {
+      setIsLoadingMessages(false);
+      setOrbPhase('idle');
+    }
+  };
+
+  const handleNewThread = async () => {
+    setActiveThread(null);
+    setIsThreadsDrawerOpen(false);
+    setMessages([
+      {
+        id: `msg-${Date.now()}`,
+        sender: 'omni',
+        text: "I am Omni, your shadow companion. Whether you need direct intelligence in Normal Chat or want to assemble the Unified Multi-LLM Council for high-stakes problem solving, I am online and listening.",
+        timestamp: 'Just now',
+        mode: 'normal',
+      },
+    ]);
+  };
+
+  const handleDeleteThread = async (threadId: string) => {
+    if (!supabaseUser) return;
+    try {
+      await deleteChatThread(threadId, supabaseUser.id);
+      setThreads((prev) => prev.filter((t) => t.id !== threadId));
+      if (activeThread?.id === threadId) {
+        handleNewThread();
+      }
+      setConfirmDeleteId(null);
+    } catch (err) {
+      console.error('Failed to delete thread:', err);
+    }
+  };
+
+  const handleRenameThread = async (threadId: string, newTitle: string) => {
+    if (!supabaseUser || !newTitle.trim()) return;
+    try {
+      await renameChatThread(threadId, supabaseUser.id, newTitle);
+      setThreads((prev) => prev.map((t) => (t.id === threadId ? { ...t, title: newTitle.trim() } : t)));
+      if (activeThread?.id === threadId) {
+        setActiveThread((prev) => (prev ? { ...prev, title: newTitle.trim() } : null));
+      }
+      setEditingThreadId(null);
+    } catch (err) {
+      console.error('Failed to rename thread:', err);
+    }
+  };
+
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setAuthLoading(true);
+
+    try {
+      if (authMode === 'signin') {
+        await signInWithEmail(authEmail, authPassword);
+      } else {
+        await signUpWithEmail(authEmail, authPassword, authDisplayName);
+      }
+      setIsAuthModalOpen(false);
+      setAuthPassword('');
+    } catch (err: any) {
+      setAuthError(err.message || 'Authentication failed. Please verify your credentials.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await supabaseSignOut();
+      setSupabaseUser(null);
+      setThreads([]);
+      setActiveThread(null);
+      setIsAuthModalOpen(false);
+    } catch (err) {
+      console.error('Sign out error:', err);
+    }
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -226,6 +418,43 @@ export const OmniChatAndCouncil: React.FC<OmniChatAndCouncilProps> = ({ onSaveTo
     setIsGenerating(true);
     setOrbPhase('processing');
 
+    // Auto-create or ensure active Supabase chat thread
+    let currentThread = activeThread;
+    if (supabaseUser && !currentThread) {
+      try {
+        const title = userMessageText.slice(0, 40) || 'New conversation';
+        currentThread = await createChatThread(supabaseUser.id, title);
+        setActiveThread(currentThread);
+        setThreads((prev) => [currentThread!, ...prev]);
+      } catch (err) {
+        console.warn('Could not auto-create thread in Supabase:', err);
+      }
+    }
+
+    // Persist user message to Supabase
+    if (supabaseUser && currentThread) {
+      saveChatMessage(currentThread.id, supabaseUser.id, userMsg.id, {
+        role: 'user',
+        sender: 'user',
+        text: userMessageText,
+        mode: activeMode,
+        content: userMessageText,
+      }).catch((err) => console.warn('Could not save user message:', err));
+    }
+
+    const persistAssistantMessage = (replyMsg: ChatMessage) => {
+      if (supabaseUser && currentThread) {
+        saveChatMessage(currentThread.id, supabaseUser.id, replyMsg.id, {
+          role: 'assistant',
+          sender: replyMsg.sender,
+          text: replyMsg.text,
+          mode: replyMsg.mode || activeMode,
+          content: replyMsg.text,
+          councilData: replyMsg.councilData,
+        }).catch((err) => console.warn('Could not save assistant message:', err));
+      }
+    };
+
     if (activeMode === 'council') {
       // Execute Multi-LLM Council
       try {
@@ -249,6 +478,7 @@ export const OmniChatAndCouncil: React.FC<OmniChatAndCouncilProps> = ({ onSaveTo
             councilData: councilRes,
           };
           setMessages((prev) => [...prev, councilMsg]);
+          persistAssistantMessage(councilMsg);
         } else {
           // Robust client-side Council generation fallback
           const simulatedCouncil: ChatMessage = {
@@ -366,6 +596,7 @@ export const OmniChatAndCouncil: React.FC<OmniChatAndCouncilProps> = ({ onSaveTo
             mode: 'normal',
           };
           setMessages((prev) => [...prev, omniMsg]);
+          persistAssistantMessage(omniMsg);
         } else {
           const mockReply: ChatMessage = {
             id: `omni-${Date.now()}`,
@@ -408,42 +639,102 @@ export const OmniChatAndCouncil: React.FC<OmniChatAndCouncilProps> = ({ onSaveTo
   return (
     <div className="h-full flex flex-col bg-[#07090f] text-slate-100 overflow-hidden font-sans">
       
-      {/* Compact Mobile Mode Switcher Bar */}
-      <div className="px-3 py-2 bg-[#090c15] border-b border-slate-800 flex items-center justify-between flex-shrink-0">
-        <div className="flex items-center gap-2">
+      {/* Compact Mobile Mode Switcher & Threads Bar */}
+      <div className="px-3 py-2 bg-[#090c15] border-b border-slate-800 flex items-center justify-between flex-shrink-0 gap-2">
+        {/* Left: HoloOrb + Thread Selector */}
+        <div className="flex items-center gap-1.5 overflow-hidden">
           <HoloOrb phase={orbPhase} className="w-6 h-6 flex-shrink-0" />
-          <span className="font-bold text-xs text-white">
-            {activeMode === 'normal' ? 'Omni Chat' : 'Council Quorum'}
-          </span>
+          <button
+            onClick={() => setIsThreadsDrawerOpen(true)}
+            className="flex items-center gap-1.5 px-2 py-1 rounded-xl bg-black/60 border border-slate-800 hover:border-cyan-500/40 transition max-w-[140px] sm:max-w-[200px]"
+            title="Open Conversations & Threads"
+          >
+            <History className="w-3.5 h-3.5 text-[#00f2fe] shrink-0" />
+            <span className="truncate text-xs font-mono font-medium text-slate-200">
+              {activeThread ? activeThread.title : 'New Chat'}
+            </span>
+            <ChevronDown className="w-3 h-3 text-slate-500 shrink-0" />
+          </button>
         </div>
 
-        {/* Compact Mode Switcher */}
-        <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-xs font-semibold">
+        {/* Right: Mode Switcher + Auth + New Thread */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Compact Mode Switcher */}
+          <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-xs font-semibold">
+            <button
+              onClick={() => setActiveMode('normal')}
+              className={`px-2 py-0.5 rounded-md flex items-center gap-1 transition-all ${
+                activeMode === 'normal'
+                  ? 'bg-cyan-500 text-slate-950 font-bold shadow-sm'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Bot className="w-3 h-3" />
+              <span className="text-[10px]">Normal</span>
+            </button>
+            <button
+              onClick={() => setActiveMode('council')}
+              className={`px-2 py-0.5 rounded-md flex items-center gap-1 transition-all ${
+                activeMode === 'council'
+                  ? 'bg-purple-600 text-white font-bold shadow-sm'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Users className="w-3 h-3" />
+              <span className="text-[10px]">Council</span>
+            </button>
+          </div>
+
+          {/* Supabase Account Status */}
+          {supabaseUser ? (
+            <button
+              onClick={() => setIsAuthModalOpen(true)}
+              className="flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-950/40 border border-emerald-500/40 text-[10px] font-mono text-emerald-300 hover:border-emerald-400 transition"
+              title={`Supabase Connected: ${supabaseUser.email}`}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              <span className="hidden sm:inline truncate max-w-[65px]">{supabaseUser.email?.split('@')[0]}</span>
+            </button>
+          ) : (
+            <button
+              onClick={() => setIsAuthModalOpen(true)}
+              className="flex items-center gap-1 px-2 py-1 rounded-lg bg-cyan-950/40 border border-cyan-500/40 text-[10px] font-mono text-cyan-300 hover:text-white transition shadow-sm"
+              title="Sign in with Supabase account to sync threads across web & phone"
+            >
+              <LogIn className="w-3 h-3" />
+              <span className="hidden xs:inline">Sync</span>
+            </button>
+          )}
+
+          {/* Quick New Thread Button */}
           <button
-            onClick={() => setActiveMode('normal')}
-            className={`px-2.5 py-1 rounded-md flex items-center gap-1 transition-all ${
-              activeMode === 'normal'
-                ? 'bg-cyan-500 text-slate-950 font-bold shadow-sm'
-                : 'text-slate-400 hover:text-white'
-            }`}
+            onClick={handleNewThread}
+            className="p-1 rounded-lg bg-slate-900 border border-slate-800 hover:border-cyan-500/40 text-slate-300 hover:text-white transition"
+            title="Start New Conversation"
           >
-            <Bot className="w-3 h-3" />
-            <span className="text-[11px]">Normal</span>
-          </button>
-          <button
-            onClick={() => setActiveMode('council')}
-            className={`px-2.5 py-1 rounded-md flex items-center gap-1 transition-all ${
-              activeMode === 'council'
-                ? 'bg-purple-600 text-white font-bold shadow-sm'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Users className="w-3 h-3" />
-            <span className="text-[11px]">Council</span>
-            <span className="text-[8px] bg-black/40 text-purple-200 px-1 rounded">6</span>
+            <Plus className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
+
+      {/* Informational Supabase Sync Banner if unauthenticated */}
+      {!supabaseUser && (
+        <div className="px-3 py-1.5 bg-[#090e1c] border-b border-cyan-900/40 flex items-center justify-between text-[11px] font-mono shrink-0">
+          <div className="flex items-center gap-1.5 text-slate-300 truncate">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#00f2fe] animate-pulse shrink-0" />
+            <span className="truncate">Sign in with Supabase to sync threads with OmniAI Web.</span>
+          </div>
+          <button
+            onClick={() => {
+              setAuthMode('signin');
+              setIsAuthModalOpen(true);
+            }}
+            className="text-[#00f2fe] hover:underline font-bold shrink-0 ml-2"
+          >
+            Sign In →
+          </button>
+        </div>
+      )}
 
       {/* Council Mode Banner */}
       {activeMode === 'council' && (
@@ -787,6 +1078,356 @@ export const OmniChatAndCouncil: React.FC<OmniChatAndCouncilProps> = ({ onSaveTo
           </div>
         )}
       </div>
+
+      {/* SLIDE-OUT THREADS & CONVERSATIONS DRAWER */}
+      {isThreadsDrawerOpen && (
+        <div className="fixed inset-0 z-50 flex">
+          {/* Backdrop */}
+          <div
+            onClick={() => setIsThreadsDrawerOpen(false)}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm animate-in fade-in"
+          />
+
+          {/* Drawer Content */}
+          <div className="relative w-80 max-w-[85vw] h-full bg-[#0a0d18] border-r border-slate-800 flex flex-col z-10 shadow-2xl animate-in slide-in-from-left duration-200">
+            {/* Drawer Header */}
+            <div className="p-3 bg-[#07090f] border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <History className="w-4 h-4 text-cyan-400" />
+                <h3 className="font-bold text-xs text-white uppercase tracking-wider font-mono">
+                  Conversations
+                </h3>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={handleNewThread}
+                  className="p-1.5 rounded-lg bg-cyan-950/60 border border-cyan-500/40 text-cyan-300 hover:text-white transition"
+                  title="New Conversation"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => setIsThreadsDrawerOpen(false)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-white transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Search Filter */}
+            {threads.length > 0 && (
+              <div className="p-2 border-b border-slate-800/80">
+                <div className="flex items-center gap-1.5 bg-[#05060b] border border-slate-800 rounded-lg px-2 py-1 text-xs">
+                  <Search className="w-3.5 h-3.5 text-slate-500" />
+                  <input
+                    type="text"
+                    value={threadsSearchQuery}
+                    onChange={(e) => setThreadsSearchQuery(e.target.value)}
+                    placeholder="Search conversations..."
+                    className="bg-transparent border-0 text-slate-200 placeholder-slate-600 focus:outline-none text-xs w-full font-mono"
+                  />
+                  {threadsSearchQuery && (
+                    <button onClick={() => setThreadsSearchQuery('')} className="text-slate-500 hover:text-white">
+                      ×
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Threads List */}
+            <div className="flex-1 overflow-y-auto p-2 space-y-1">
+              {!supabaseUser ? (
+                <div className="p-4 text-center space-y-3">
+                  <div className="w-10 h-10 rounded-xl bg-cyan-950/40 border border-cyan-500/30 flex items-center justify-center mx-auto text-cyan-400">
+                    <Lock className="w-5 h-5" />
+                  </div>
+                  <h4 className="text-xs font-bold text-white">Cloud Sync Available</h4>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Sign in with your Supabase account to sync your conversation threads and private memory between phone and web.
+                  </p>
+                  <button
+                    onClick={() => {
+                      setIsThreadsDrawerOpen(false);
+                      setIsAuthModalOpen(true);
+                    }}
+                    className="w-full py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-slate-950 font-bold text-xs shadow-md shadow-cyan-500/20 active:scale-95 transition"
+                  >
+                    Sign In with Supabase
+                  </button>
+                </div>
+              ) : threads.length === 0 ? (
+                <div className="p-6 text-center text-xs text-slate-500 font-mono">
+                  No conversations yet. Send a message to start your first thread!
+                </div>
+              ) : (
+                threads
+                  .filter((t) =>
+                    threadsSearchQuery
+                      ? t.title.toLowerCase().includes(threadsSearchQuery.toLowerCase())
+                      : true
+                  )
+                  .map((t) => {
+                    const isActive = activeThread?.id === t.id;
+                    const isEditing = editingThreadId === t.id;
+                    return (
+                      <div
+                        key={t.id}
+                        className={`group relative rounded-xl p-2.5 transition-all text-xs flex items-center justify-between gap-2 ${
+                          isActive
+                            ? 'bg-cyan-950/50 border border-cyan-500/40 text-cyan-200'
+                            : 'bg-black/40 border border-slate-800/80 hover:border-slate-700 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        {isEditing ? (
+                          <div className="flex items-center gap-1.5 w-full">
+                            <input
+                              type="text"
+                              value={editingTitle}
+                              onChange={(e) => setEditingTitle(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleRenameThread(t.id, editingTitle);
+                                if (e.key === 'Escape') setEditingThreadId(null);
+                              }}
+                              autoFocus
+                              className="bg-black border border-cyan-500 rounded px-2 py-1 text-xs text-white w-full focus:outline-none"
+                            />
+                            <button
+                              onClick={() => handleRenameThread(t.id, editingTitle)}
+                              className="p-1 rounded bg-cyan-500 text-slate-950 font-bold"
+                            >
+                              <Check className="w-3 h-3" />
+                            </button>
+                            <button
+                              onClick={() => setEditingThreadId(null)}
+                              className="p-1 rounded text-slate-400 hover:text-white"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <div
+                              onClick={() => handleSelectThread(t)}
+                              className="flex-1 min-w-0 cursor-pointer"
+                            >
+                              <p className="font-medium truncate leading-snug">{t.title}</p>
+                              <p className="text-[10px] text-slate-500 font-mono mt-0.5">
+                                {new Date(t.updated_at).toLocaleDateString([], {
+                                  month: 'short',
+                                  day: 'numeric',
+                                })}
+                              </p>
+                            </div>
+
+                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingThreadId(t.id);
+                                  setEditingTitle(t.title);
+                                }}
+                                className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-cyan-300"
+                                title="Rename thread"
+                              >
+                                <Edit2 className="w-3 h-3" />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (confirmDeleteId === t.id) {
+                                    handleDeleteThread(t.id);
+                                  } else {
+                                    setConfirmDeleteId(t.id);
+                                    setTimeout(() => setConfirmDeleteId(null), 3000);
+                                  }
+                                }}
+                                className={`p-1 rounded hover:bg-slate-800 ${
+                                  confirmDeleteId === t.id ? 'text-red-400 font-bold' : 'text-slate-400 hover:text-red-400'
+                                }`}
+                                title={confirmDeleteId === t.id ? 'Click again to confirm delete' : 'Delete thread'}
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })
+              )}
+            </div>
+
+            {/* Drawer Footer Account Area */}
+            {supabaseUser && (
+              <div className="p-3 border-t border-slate-800 bg-[#07090f] flex items-center justify-between text-xs">
+                <div className="flex items-center gap-2 truncate">
+                  <div className="w-6 h-6 rounded-full bg-emerald-950 border border-emerald-500/40 text-emerald-400 flex items-center justify-center font-bold text-[10px]">
+                    {supabaseUser.email?.charAt(0).toUpperCase()}
+                  </div>
+                  <span className="truncate text-slate-300 font-mono text-[11px]">{supabaseUser.email}</span>
+                </div>
+                <button
+                  onClick={handleSignOut}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition"
+                  title="Sign out of Supabase"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* SUPABASE AUTH MODAL */}
+      {isAuthModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in">
+          <div className="relative w-full max-w-sm bg-[#090c16] border border-cyan-500/40 rounded-2xl p-5 shadow-2xl space-y-4 font-sans">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-cyan-950/60 border border-cyan-500/40 flex items-center justify-center text-cyan-400 font-bold text-xs">
+                  ⚡
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-white">OmniAI Account Sync</h3>
+                  <p className="text-[10px] font-mono text-slate-400">Powered by shared Supabase database</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsAuthModalOpen(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {supabaseUser ? (
+              <div className="space-y-4">
+                <div className="p-3 rounded-xl bg-black/60 border border-emerald-500/30 space-y-2">
+                  <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    <span>Connected to Supabase</span>
+                  </div>
+                  <p className="text-xs text-slate-200">
+                    Signed in as: <strong className="text-white font-mono">{supabaseUser.email}</strong>
+                  </p>
+                  <p className="text-[10px] text-slate-400 font-mono truncate">ID: {supabaseUser.id}</p>
+                  <p className="text-[11px] text-slate-400">
+                    Conversations, threads, and private memory are synced with your web workspace.
+                  </p>
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setIsAuthModalOpen(false);
+                      setIsThreadsDrawerOpen(true);
+                    }}
+                    className="flex-1 py-2 rounded-xl bg-slate-800 text-slate-200 hover:text-white text-xs font-semibold transition"
+                  >
+                    View Threads
+                  </button>
+                  <button
+                    onClick={handleSignOut}
+                    className="px-4 py-2 rounded-xl bg-red-950/40 border border-red-500/40 text-red-300 hover:bg-red-900/50 text-xs font-bold transition flex items-center gap-1.5"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    <span>Sign Out</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={handleAuthSubmit} className="space-y-3">
+                {/* Mode Selector */}
+                <div className="grid grid-cols-2 p-1 rounded-xl bg-black border border-slate-800 text-xs font-semibold">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode('signin');
+                      setAuthError(null);
+                    }}
+                    className={`py-1.5 rounded-lg transition-all ${
+                      authMode === 'signin' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-slate-400'
+                    }`}
+                  >
+                    Sign In
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode('signup');
+                      setAuthError(null);
+                    }}
+                    className={`py-1.5 rounded-lg transition-all ${
+                      authMode === 'signup' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-slate-400'
+                    }`}
+                  >
+                    Create Account
+                  </button>
+                </div>
+
+                {authMode === 'signup' && (
+                  <div>
+                    <label className="text-[11px] font-mono text-slate-300 block mb-1">Display Name</label>
+                    <input
+                      type="text"
+                      value={authDisplayName}
+                      onChange={(e) => setAuthDisplayName(e.target.value)}
+                      placeholder="Your name or callsign"
+                      className="w-full px-3 py-2 rounded-xl bg-black border border-slate-800 text-xs text-white focus:outline-none focus:border-cyan-500 font-mono"
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <label className="text-[11px] font-mono text-slate-300 block mb-1">Email</label>
+                  <input
+                    type="email"
+                    required
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="name@example.com"
+                    className="w-full px-3 py-2 rounded-xl bg-black border border-slate-800 text-xs text-white focus:outline-none focus:border-cyan-500 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-mono text-slate-300 block mb-1">Password</label>
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full px-3 py-2 rounded-xl bg-black border border-slate-800 text-xs text-white focus:outline-none focus:border-cyan-500 font-mono"
+                  />
+                </div>
+
+                {authError && (
+                  <div className="p-2.5 rounded-xl bg-red-950/40 border border-red-500/40 text-red-300 text-[11px] leading-tight">
+                    {authError}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className="w-full py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-md shadow-cyan-500/20 active:scale-95 transition disabled:opacity-50"
+                >
+                  {authLoading ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <span>{authMode === 'signin' ? 'Sign In to OmniAI' : 'Create Supabase Account'}</span>
+                  )}
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
 
     </div>
   );
